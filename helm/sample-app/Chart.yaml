@@ -1,0 +1,11 @@
+apiVersion: v2
+name: sample-app
+description: Python Flask app used to demonstrate all auto-healing failure scenarios
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - demo
+  - auto-healing
+maintainers:
+  - name: akshay

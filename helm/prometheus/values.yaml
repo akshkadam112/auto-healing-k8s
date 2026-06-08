@@ -1,0 +1,108 @@
+# kube-prometheus-stack values for the auto-healing demo
+# Install: helm upgrade --install kube-prom prometheus-community/kube-prometheus-stack \
+#            -n monitoring --create-namespace -f helm/prometheus/values.yaml
+
+grafana:
+  enabled: true
+  adminPassword: admin   # change for any non-local env
+  sidecar:
+    dashboards:
+      enabled: true
+      searchNamespace: ALL
+
+prometheus:
+  prometheusSpec:
+    # Scrape interval — short for demo so failures appear in dashboards quickly
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+
+    # Pick up PrometheusRule objects from all namespaces
+    ruleNamespaceSelector: {}
+    ruleSelector: {}
+
+    # Pick up ServiceMonitor / PodMonitor objects from all namespaces
+    serviceMonitorNamespaceSelector: {}
+    serviceMonitorSelector: {}
+    podMonitorNamespaceSelector: {}
+    podMonitorSelector: {}
+
+    retention: 7d
+    resources:
+      requests:
+        memory: 512Mi
+      limits:
+        memory: 1Gi
+
+    # Pick up the sample-app /metrics endpoint via pod annotation discovery
+    additionalScrapeConfigs:
+      - job_name: "sample-app"
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: ["demo"]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        memory: 64Mi
+
+  config:
+    global:
+      resolve_timeout: 5m
+
+    route:
+      group_by: ["alertname", "namespace"]
+      group_wait: 10s
+      group_interval: 30s
+      repeat_interval: 1h
+      receiver: "webhook-operator"
+      routes:
+        # Pod-level failures → kopf operator webhook
+        - matchers:
+            - name: severity
+              value: critical
+            - name: category
+              value: pod
+          receiver: "webhook-operator"
+
+        # Node-level failures → Karpenter handles; page for awareness
+        - matchers:
+            - name: category
+              value: node
+          receiver: "webhook-operator"
+
+        # Workload failures → kopf or HPA
+        - matchers:
+            - name: category
+              value: workload
+          receiver: "webhook-operator"
+
+    receivers:
+      - name: "webhook-operator"
+        webhook_configs:
+          - url: "http://auto-healing-operator.demo.svc.cluster.local:8080/webhook"
+            send_resolved: true
+
+# node-problem-detector — detects kernel/OS faults and emits NodeConditions
+nodeExporter:
+  enabled: true
+
+kubelet:
+  enabled: true
+
+kubeStateMetrics:
+  enabled: true

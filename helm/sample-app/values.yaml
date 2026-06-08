@@ -1,0 +1,73 @@
+# Default values — override per scenario with --set or a values override file.
+
+replicaCount: 2
+
+image:
+  repository: sample-app   # build locally inside minikube: eval $(minikube docker-env)
+  tag: latest
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+# Resource limits are intentionally tight so MEMORY_HOG_MB can trigger OOMKill.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 150Mi   # MEMORY_HOG_MB=200 will exceed this and trigger OOMKill
+
+# Liveness probe — LIVENESS_FAIL=true makes /health return 500 → kubelet restarts pod
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+
+# Readiness probe — READINESS_FAIL=true makes /ready return 503 → removed from endpoints
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  failureThreshold: 3
+
+# Deployment rolls out over 90s; SLOW_START_SECONDS=120 will breach this → stuck rollout
+progressDeadlineSeconds: 90
+
+# Failure-injection env vars — all disabled by default.
+# Override with: helm upgrade sample-app ./helm/sample-app --set env.CRASH_ON_START=true
+env:
+  CRASH_ON_START: "false"
+  MEMORY_HOG_MB: "0"
+  SLOW_START_SECONDS: "0"
+  LIVENESS_FAIL: "false"
+  READINESS_FAIL: "false"
+  CPU_STRESS_CORES: "0"
+  RESPONSE_DELAY: "0"
+
+# Labels and annotations that the kopf operator and Prometheus use.
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/path: /metrics
+  prometheus.io/port: "8080"
+  auto-healing.io/enabled: "true"
+
+podLabels:
+  app.kubernetes.io/part-of: auto-healing-demo
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 60   # HPA scales out on traffic spike
