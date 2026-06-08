@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: auto-healing-operator-config
+  namespace: demo
+data:
+  # Number of pod restarts before the crashloop handler intervenes
+  CRASH_RESTART_THRESHOLD: "3"
+  # Memory limit bump percentage when OOMKill is detected
+  MEMORY_BUMP_PERCENT: "50"
+  # Only watch pods with this annotation set to "true"
+  WATCHED_ANNOTATION: "auto-healing.io/enabled"

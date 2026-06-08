@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auto-healing-operator
+  namespace: demo
+  labels:
+    app: auto-healing-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auto-healing-operator
+  template:
+    metadata:
+      labels:
+        app: auto-healing-operator
+    spec:
+      serviceAccountName: auto-healing-operator
+      containers:
+        - name: operator
+          image: auto-healing-operator:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: liveness
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          envFrom:
+            - configMapRef:
+                name: auto-healing-operator-config
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
