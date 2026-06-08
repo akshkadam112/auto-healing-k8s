@@ -1,0 +1,216 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: auto-healing-rules
+  namespace: monitoring
+  labels:
+    release: kube-prom   # must match kube-prometheus-stack release name
+spec:
+  groups:
+
+    # -------------------------------------------------------------------------
+    # Pod-level failures (4)
+    # -------------------------------------------------------------------------
+    - name: pod.crashloop
+      rules:
+        - alert: PodCrashLoopBackOff
+          expr: |
+            kube_pod_container_status_waiting_reason{reason="CrashLoopBackOff"} == 1
+          for: 1m
+          labels:
+            severity: critical
+            category: pod
+            healed_by: kopf-crashloop
+          annotations:
+            summary: "Pod {{ $labels.pod }} is in CrashLoopBackOff"
+            description: >
+              Container {{ $labels.container }} in pod {{ $labels.namespace }}/{{ $labels.pod }}
+              has been in CrashLoopBackOff for more than 1 minute.
+              kopf crashloop handler will unset CRASH_ON_START and trigger a clean rollout.
+
+    - name: pod.oomkill
+      rules:
+        - alert: PodOOMKilled
+          expr: |
+            kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1
+          for: 0m
+          labels:
+            severity: critical
+            category: pod
+            healed_by: kopf-oomkill
+          annotations:
+            summary: "Pod {{ $labels.pod }} was OOMKilled"
+            description: >
+              Container {{ $labels.container }} in {{ $labels.namespace }}/{{ $labels.pod }}
+              was killed by the OOM killer.
+              kopf oomkill handler will raise the memory limit by 50% and restart.
+
+    - name: pod.liveness
+      rules:
+        - alert: PodLivenessProbeFailure
+          expr: |
+            kube_pod_container_status_restarts_total
+              - kube_pod_container_status_restarts_total offset 5m > 0
+            and on(pod, namespace)
+            kube_pod_container_status_ready == 0
+          for: 2m
+          labels:
+            severity: warning
+            category: pod
+            healed_by: k8s-native
+          annotations:
+            summary: "Liveness probe failing for {{ $labels.pod }}"
+            description: >
+              Pod {{ $labels.namespace }}/{{ $labels.pod }} has restarted due to liveness probe
+              failure. K8s kubelet will keep restarting the container automatically.
+
+    - name: pod.readiness
+      rules:
+        - alert: PodNotReady
+          expr: |
+            kube_pod_status_ready{condition="true"} == 0
+          for: 2m
+          labels:
+            severity: warning
+            category: pod
+            healed_by: k8s-native
+          annotations:
+            summary: "Pod {{ $labels.pod }} is not ready"
+            description: >
+              Pod {{ $labels.namespace }}/{{ $labels.pod }} has not been ready for 2 minutes.
+              It has been removed from Service endpoints. K8s will restore it once /ready returns 200.
+
+    # -------------------------------------------------------------------------
+    # Node-level failures (4)
+    # -------------------------------------------------------------------------
+    - name: node.notready
+      rules:
+        - alert: NodeNotReady
+          expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+          for: 2m
+          labels:
+            severity: critical
+            category: node
+            healed_by: karpenter
+          annotations:
+            summary: "Node {{ $labels.node }} is NotReady"
+            description: >
+              Node {{ $labels.node }} has been NotReady for 2 minutes.
+              Karpenter will cordon, drain, and replace the node automatically.
+
+    - name: node.diskpressure
+      rules:
+        - alert: NodeDiskPressure
+          expr: kube_node_status_condition{condition="DiskPressure",status="true"} == 1
+          for: 1m
+          labels:
+            severity: critical
+            category: node
+            healed_by: karpenter
+          annotations:
+            summary: "Node {{ $labels.node }} has disk pressure"
+            description: >
+              Node {{ $labels.node }} is reporting DiskPressure.
+              Karpenter eviction thresholds will evict pods and reclaim disk space.
+
+    - name: node.memorypressure
+      rules:
+        - alert: NodeMemoryPressure
+          expr: kube_node_status_condition{condition="MemoryPressure",status="true"} == 1
+          for: 1m
+          labels:
+            severity: critical
+            category: node
+            healed_by: karpenter
+          annotations:
+            summary: "Node {{ $labels.node }} has memory pressure"
+            description: >
+              Node {{ $labels.node }} is reporting MemoryPressure.
+              Karpenter will evict low-priority pods or provision a new node.
+
+    - name: node.kernelfault
+      rules:
+        - alert: NodeKernelFault
+          expr: |
+            kube_node_status_condition{condition=~"KernelDeadlock|ReadonlyFilesystem|FrequentUnregisterNetDevice",status="true"} == 1
+          for: 0m
+          labels:
+            severity: critical
+            category: node
+            healed_by: node-problem-detector
+          annotations:
+            summary: "Kernel fault on node {{ $labels.node }}"
+            description: >
+              node-problem-detector has flagged condition {{ $labels.condition }} on
+              node {{ $labels.node }}. NPD will taint the node so pods are rescheduled.
+
+    # -------------------------------------------------------------------------
+    # Workload & scaling failures (4)
+    # -------------------------------------------------------------------------
+    - name: workload.latency
+      rules:
+        - alert: HighRequestLatency
+          expr: |
+            histogram_quantile(0.99,
+              rate(http_request_duration_seconds_bucket{job="sample-app"}[5m])
+            ) > 1.0
+          for: 2m
+          labels:
+            severity: warning
+            category: workload
+            healed_by: hpa
+          annotations:
+            summary: "p99 latency > 1s for sample-app"
+            description: >
+              99th-percentile request latency has been above 1 second for 2 minutes.
+              HPA will scale out additional pods to absorb the traffic spike.
+
+    - name: workload.pendingpods
+      rules:
+        - alert: PodsPending
+          expr: |
+            kube_pod_status_phase{phase="Pending"} == 1
+          for: 3m
+          labels:
+            severity: warning
+            category: workload
+            healed_by: karpenter
+          annotations:
+            summary: "Pod {{ $labels.pod }} has been Pending for 3 minutes"
+            description: >
+              Pod {{ $labels.namespace }}/{{ $labels.pod }} cannot be scheduled — likely
+              insufficient node capacity. Karpenter will provision a new node.
+
+    - name: workload.stuckrollout
+      rules:
+        - alert: DeploymentRolloutStuck
+          expr: |
+            kube_deployment_status_condition{condition="Progressing",status="false"} == 1
+          for: 0m
+          labels:
+            severity: critical
+            category: workload
+            healed_by: kopf-rollout
+          annotations:
+            summary: "Deployment {{ $labels.deployment }} rollout is stuck"
+            description: >
+              Deployment {{ $labels.namespace }}/{{ $labels.deployment }} has exceeded
+              progressDeadlineSeconds. kopf rollout handler will roll back to the previous
+              stable revision.
+
+    - name: workload.tlsexpiry
+      rules:
+        - alert: TLSCertExpiringSoon
+          expr: |
+            certmanager_certificate_expiration_timestamp_seconds
+              - time() < 7 * 24 * 3600
+          for: 1h
+          labels:
+            severity: warning
+            category: workload
+            healed_by: cert-manager
+          annotations:
+            summary: "TLS cert {{ $labels.name }} expires in < 7 days"
+            description: >
+              Certificate {{ $labels.namespace }}/{{ $labels.name }} expires soon.
+              cert-manager will automatically renew it before expiry.
